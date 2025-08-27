@@ -58,15 +58,19 @@ def measure_generation_latency(
 
 def estimate_total_latency(
     hardware="RTX3090",
-    model_name="meta-llama/Llama-3.1-8B-Instruct",
+    model_name="meta-llama/Llama-3.1-8B",
     num_layers=32,
     input_length=10,
     output_length=5,
     verbose=False
 ):
+    
+    # load model config
+    config = AutoConfig.from_pretrained(model_name)
+
     # Load latency data from CSV
     latency_db = defaultdict(dict)  # (input, kv) -> {block_name -> latency_ns}
-    csv_path = f"{hardware}.csv"
+    csv_path = f"{hardware}/{model_name}.csv"
     with open(csv_path, newline='') as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
@@ -92,6 +96,21 @@ def estimate_total_latency(
             "act_fn",
             "down_proj"
         ]
+
+    elif 'phi' in model_name.lower():
+            block_components = [
+                "input_layernorm",
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "rope",
+                "attn",
+                "o_proj",
+                "post_layernorm",
+                "gate",
+                "sparsemixer"
+            ]
+
     else:  # OPT
         block_components = [
             "input_layernorm",
@@ -118,6 +137,12 @@ def estimate_total_latency(
     block_latencies = latency_db[prefill_key]
     block_sum = sum(block_latencies.get(comp, 0) for comp in block_components)
     total_latency_ns += num_layers * block_sum
+    if 'phi' in model_name.lower():
+        # Runs experts sequentially in huggungface implementation
+        num_local_experts = config.num_local_experts if hasattr(config, 'num_local_experts') else 1
+        moe_components = ["expert.w1", "expert.w2", "act_fn", "expert.w3"]
+        moe_sum = sum(block_latencies.get(comp, 0) for comp in moe_components)
+        total_latency_ns += num_layers * moe_sum * num_local_experts
 
     # Add one-time components
     for comp in ["embedding", "final_layernorm", "lm_head"]:
@@ -133,6 +158,13 @@ def estimate_total_latency(
         block_sum = sum(block_latencies.get(comp, 0) for comp in block_components)
         total_latency_ns += num_layers * block_sum
         total_latency_ns += block_latencies.get("lm_head", 0)
+        if 'phi' in model_name.lower():
+            # Runs experts sequentially in huggungface implementation
+            moe_sum = sum(block_latencies.get(comp, 0) for comp in moe_components)
+            total_latency_ns += num_layers * moe_sum * num_local_experts
+
+        for comp in ["embedding", "final_layernorm", "lm_head"]:
+            total_latency_ns += block_latencies.get(comp, 0)
 
     total_latency_ms = total_latency_ns / 1e6  # convert ns to ms
 
@@ -143,11 +175,11 @@ def estimate_total_latency(
 
 def compute_average_scaling_factor(
     hardware="RTX3090",
-    model_name="meta-llama/Llama-3.1-8B-Instruct",
+    model_name="meta-llama/Llama-3.1-8B",
     num_layers=None,
     input_lengths=[10, 20, 30],
     output_lengths=[2, 4, 6],
-    num_trials=3,
+    repeat=3,
     device=None,
     verbose=False
 ):
@@ -163,7 +195,7 @@ def compute_average_scaling_factor(
 
     # Reduce number of layers if specified
     if num_layers is not None:
-        if 'llama' in model_name.lower():
+        if 'llama' in model_name.lower() or 'phi' in model_name.lower():
             model.model.layers = model.model.layers[:num_layers]
         else:
             model.model.decoder.layers = model.model.decoder.layers[:num_layers]
@@ -178,7 +210,7 @@ def compute_average_scaling_factor(
             measured_latencies = []
             estimated_latencies = []
 
-            for trial in range(num_trials):
+            for _ in range(repeat):
                 # real latency
                 try:
                     measured = measure_generation_latency(
@@ -224,25 +256,26 @@ def compute_average_scaling_factor(
 
     avg_scaling = sum(scaling_factors) / len(scaling_factors)
 
-    if verbose:
-        print(f"\nAverage Scaling Factor (measured / estimated): {avg_scaling:.3f}")
+
+    print(f"\nAverage Scaling Factor (measured / estimated): {avg_scaling:.3f}")
 
     return avg_scaling
 
 
 def apply_scaling_to_latency_csv(
     hardware="RTX3090",
+    model_name="meta-llama/Llama-3.1-8B",
     scaling_factor=1,
     output_path=None,
-    overwrite=False):
+    overwrite=True):
 
-    csv_path = f"{hardware}.csv"
+    csv_path = f"{hardware}/{model_name}.csv"
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"{csv_path} not found")
 
     if output_path is None:
         base, ext = os.path.splitext(csv_path)
-        output_path = f"{base}_scaled{ext}"
+        output_path = f"{base}-scaled{ext}"
 
     scaled_rows = []
     with open(csv_path, newline='') as f:

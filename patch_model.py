@@ -6,6 +6,8 @@ import math
 import types
 import transformers.models.llama.modeling_llama as llama_modeling
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, DynamicCache
+import transformers.models.phimoe.modeling_phimoe as phimoe_modeling
+from transformers.models.phimoe.modeling_phimoe import PhimoeRotaryEmbedding
 
 
 def wrap_with_profiler(name, orig_fn):
@@ -32,6 +34,39 @@ def create_llama_past_key_values(config, kv_len, device):
     cos, sin = rope(dummy_x, position_ids)
 
     cache = DynamicCache()
+    for layer_idx in range(num_layers):
+        cache.update(
+            key_states,
+            value_states,
+            layer_idx,
+            {
+                "cos": cos,
+                "sin": sin,
+                "cache_position": position_ids,
+            }
+        )
+    return cache
+
+def create_phimoe_past_key_values(config, kv_len, device):
+    num_layers = config.num_hidden_layers
+    num_kv_heads = config.num_key_value_heads
+    head_dim = config.hidden_size // config.num_attention_heads
+    dtype = torch.float16 if config.torch_dtype == torch.float16 else torch.float32
+
+    key_states = torch.zeros((1, num_kv_heads, kv_len, head_dim), device=device, dtype=dtype)
+    value_states = torch.zeros((1, num_kv_heads, kv_len, head_dim), device=device, dtype=dtype)
+
+    # PhiMoE uses its own rotary embedding util & apply fn
+    # We'll precompute cos/sin for kv_len like we did for LLaMA.
+    rope = PhimoeRotaryEmbedding(config)
+
+    # dummy input to satisfy rope.forward
+    dummy_x = torch.zeros((1, kv_len, head_dim), device=device, dtype=dtype)
+
+    cos, sin = rope(dummy_x, kv_len)
+
+    cache = DynamicCache()
+    position_ids = torch.arange(kv_len, device=device).unsqueeze(0)  # shape (1, kv_len)
     for layer_idx in range(num_layers):
         cache.update(
             key_states,
@@ -92,6 +127,34 @@ def patch_opt_decoder_layer(layer):
     layer.self_attn_layer_norm.forward = wrap_with_profiler("input_layernorm", layer.self_attn_layer_norm.forward)
     layer.final_layer_norm.forward = wrap_with_profiler("post_layernorm", layer.final_layer_norm.forward)
 
+def patch_phimoe_decoder_layer(layer):
+    sa = layer.self_attn
+
+    sa.q_proj.forward = wrap_with_profiler("q_proj", sa.q_proj.forward)
+    sa.k_proj.forward = wrap_with_profiler("k_proj", sa.k_proj.forward)
+    sa.v_proj.forward = wrap_with_profiler("v_proj", sa.v_proj.forward)
+    sa.o_proj.forward = wrap_with_profiler("o_proj", sa.o_proj.forward)
+    phimoe_modeling.apply_rotary_pos_emb = wrap_with_profiler("rope", phimoe_modeling.apply_rotary_pos_emb)
+    F.scaled_dot_product_attention = wrap_with_profiler("attn", F.scaled_dot_product_attention)
+
+    # MoE MLP: router + experts
+    moe = layer.block_sparse_moe 
+    # router/gate
+    moe.gate.forward = wrap_with_profiler("gate", moe.gate.forward)
+    phimoe_modeling.sparsemixer = wrap_with_profiler("sparsemixer", phimoe_modeling.sparsemixer)
+
+    # experts
+    for expert in moe.experts:
+        # experts[i].w1, w2, w3, act_fn
+        expert.w1.forward = wrap_with_profiler(f"expert.w1", expert.w1.forward)
+        expert.w2.forward = wrap_with_profiler(f"expert.w2", expert.w2.forward)
+        expert.w3.forward = wrap_with_profiler(f"expert.w3", expert.w3.forward)
+
+        expert.act_fn = WrappedActivation(expert.act_fn)
+
+    layer.input_layernorm.forward = wrap_with_profiler("input_layernorm", layer.input_layernorm.forward)
+    layer.post_attention_layernorm.forward = wrap_with_profiler("post_layernorm", layer.post_attention_layernorm.forward)
+
 def patch_opt_attention(attn_module):
     def custom_forward(
         self,
@@ -147,21 +210,28 @@ def patch_opt_attention(attn_module):
     attn_module.forward = types.MethodType(custom_forward, attn_module)
 
 def patch_model(model, config):
-    if "Llama" in config.architectures[0]:
+    if "llama" in config.architectures[0].lower():
         for layer in model.model.layers:
             patch_llama_decoder_layer(layer)
 
         model.model.embed_tokens.forward = wrap_with_profiler("embedding", model.model.embed_tokens.forward)
         model.model.norm.forward = wrap_with_profiler("final_layernorm", model.model.norm.forward)
 
-    elif "OPT" in config.architectures[0]:
+    elif "opt" in config.architectures[0].lower():
         for layer in model.model.decoder.layers:
             patch_opt_decoder_layer(layer)
 
         model.model.decoder.embed_tokens.forward = wrap_with_profiler("embedding", model.model.decoder.embed_tokens.forward)
         model.model.decoder.final_layer_norm.forward = wrap_with_profiler("final_layernorm", model.model.decoder.final_layer_norm.forward)
 
+    elif "phimoe" in config.architectures[0].lower():
+        for layer in model.model.layers:
+            patch_phimoe_decoder_layer(layer)
+
+        model.model.embed_tokens.forward = wrap_with_profiler("embedding", model.model.embed_tokens.forward)
+        model.model.norm.forward = wrap_with_profiler("final_layernorm", model.model.norm.forward)
+
     else:
-        raise NotImplementedError("Only LLaMA and OPT models are supported.")
+        raise NotImplementedError("Only LLaMA, OPT, Phi-MoE models are supported.")
 
     model.lm_head.forward = wrap_with_profiler("lm_head", model.lm_head.forward)

@@ -6,4 +6,9 @@ docker run --name llm_profile \
   -it \
   -v $(pwd):/workspace \
   --shm-size=16g \
-  pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+  nvcr.io/nvidia/pytorch:25.01-py3 \
+  bash -lc 'set -euo pipefail
+  apt-get update && apt-get install -y git ninja-build cmake && \
+  pip install -U pip setuptools wheel packaging && \
+  pip install -U transformers && \
+  exec bash'
