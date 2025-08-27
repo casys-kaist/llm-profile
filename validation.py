@@ -58,7 +58,7 @@ def measure_generation_latency(
 
 def estimate_total_latency(
     hardware="RTX3090",
-    model_name="meta-llama/Llama-3.1-8B-Instruct",
+    model_name="meta-llama/Llama-3.1-8B",
     num_layers=32,
     input_length=10,
     output_length=5,
@@ -143,7 +143,7 @@ def estimate_total_latency(
 
 def compute_average_scaling_factor(
     hardware="RTX3090",
-    model_name="meta-llama/Llama-3.1-8B-Instruct",
+    model_name="meta-llama/Llama-3.1-8B",
     num_layers=None,
     input_lengths=[10, 20, 30],
     output_lengths=[2, 4, 6],

@@ -11,7 +11,7 @@ import gc
 
 def run_profile(
     hardware="RTX3090",
-    model_name="meta-llama/Llama-3.1-8B-Instruct",
+    model_name="meta-llama/Llama-3.1-8B",
     num_layers=None,
     input_lengths=[128, 256, 512, 1024],
     kv_cache_lengths=[0, 128, 512, 1024],
@@ -163,7 +163,7 @@ if __name__ == "__main__":
     os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN", "<your_token>")
 
     # For prefill phase: input=[1,2,3 ...], kv=0
-    run_profile(hardware="RTX3090", model_name="meta-llama/Llama-3.1-8B-Instruct",
+    run_profile(hardware="RTX3090", model_name="meta-llama/Llama-3.1-8B",
             input_lengths=range(1, 2049),
             kv_cache_lengths=range(0, 1),
             num_layers=1,
@@ -174,7 +174,7 @@ if __name__ == "__main__":
     gc.collect()
 
     # For decode phase: input=1, kv=[0,1,2, ...]
-    run_profile(hardware="RTX3090", model_name="meta-llama/Llama-3.1-8B-Instruct",
+    run_profile(hardware="RTX3090", model_name="meta-llama/Llama-3.1-8B",
             input_lengths=range(1, 2),
             kv_cache_lengths=range(0, 2048),
             num_layers=1,
@@ -189,7 +189,7 @@ if __name__ == "__main__":
     # This is because GPUs are not fully utilized when the model is shallow. 
     # To compensate for this under-utilization, we measure a scaling factor and apply it to the estimated latency. 
     # As the number of profiled layers approaches the actual model depth, the scaling factor converges to 1.
-    scaling_factor = compute_average_scaling_factor(hardware="RTX3090", model_name="meta-llama/Llama-3.1-8B-Instruct",
+    scaling_factor = compute_average_scaling_factor(hardware="RTX3090", model_name="meta-llama/Llama-3.1-8B",
             input_lengths=range(128, 1025, 128),
             output_lengths=range(128, 1025, 128),
             num_trials=3,
